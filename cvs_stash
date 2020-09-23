@@ -1,0 +1,213 @@
+#!/bin/bash
+
+help() {
+    echo 'Usage: cvs_stash list'
+    echo '       cvs_stash show <n>'
+    echo '       cvs_stash pop [n]'
+    echo '       cvs_stash drop [n]'
+    echo '       cvs_stash apply [n]'
+    echo '       cvs_stash push [files/dirs]'
+}
+
+if [[ "$1" == '--help' ]]; then
+    help
+    exit
+fi
+
+root="$HOME/.cvs_stash"
+
+main() {
+    if ! dir="$(getRepoRoot)"; then
+        exit 1
+    fi
+
+    offset="$(realpath --relative-to="$dir" "$(pwd)")"
+    reverseOffset="$(realpath --relative-to="$(pwd)" "$dir")"
+    cd "$dir"
+
+    if (( $# == 0 )); then
+        cmd=push
+    else
+        cmd="$1"
+        shift
+    fi
+
+    case "$cmd" in
+        list)
+            list "$@"
+            ;;
+        pop)
+            pop "$@"
+            ;;
+        drop)
+            drop "$@"
+            ;;
+        apply)
+            apply "$@"
+            ;;
+        push)
+            push "$@"
+            ;;
+        show)
+            show "$@"
+            ;;
+        *)
+            echo >&2 'Unknown command' "$cmd"
+            exit 1
+            ;;
+    esac
+}
+
+list() {
+    if ! [[ -d "$root/$dir" ]]; then
+        return
+    fi
+
+    for stash in $(ls "$root/$dir"); do
+        echo $stash
+    done
+}
+
+show() {
+    if (( $# != 1 )); then
+        help >&2
+        exit 1
+    fi
+
+    if ! [[ -d "$root/$dir/$1" ]]; then
+        echo >&2 "No such stash as $1 exists."
+        exit 1
+    fi
+
+    (cd "$root/$dir" && tree "$1")
+}
+
+apply() {
+    if ! [[ -d "$root/$dir/1" ]]; then
+        echo >&2 'No stashes available'
+        exit 1
+    fi
+
+    if [[ "$1" == "" ]]; then
+        n=1
+    elif ! [[ -d "$root/$dir/$1" ]]; then
+        echo >&2 "No such stash as $1"
+        exit 1
+    else
+        n="$1"
+    fi
+
+    modified="$(cd "$root/$dir/$n" && find . -type f)"
+
+    for f in $modified; do
+        if [[ "$(cvs_status "$f")" != "" ]]; then
+            if ! [[ $conflicts ]]; then
+                echo >&2 "Applying stash would overwrite changes:"
+                conflicts=true
+            fi
+
+            echo >&2 "  $(realpath --relative-to="$offset" "$f")"
+        fi
+    done
+
+    if [[ $conflicts ]]; then
+        exit 1
+    fi
+
+    for f in $modified; do
+        if ! ln -f "$root/$dir/$n/$f" "$reverseOffset/$f" || cp "$root/$dir/$n/$f" "$reverseOffset/$f" 2>/dev/null; then
+            echo >&2 "Failed to copy $(realpath --relative-to="." "$reverseOffset/$f")"
+            exit 1
+        fi
+    done
+}
+
+pop() {
+    if (( $# == 0 )); then
+        apply 1 && drop 1
+    elif (( $# == 1 )); then
+        apply "$1" && drop "$1"
+    else
+        help >&2
+        exit 1
+    fi
+}
+
+drop() {
+    if (( $# == 0 )); then
+        if ! [[ -d "$root/$dir/1" ]]; then
+            echo >&2 "No stashes available"
+            exit 1
+        else
+            n=1
+        fi
+    elif (( $# == 1 )); then
+        if ! [[ -d "$root/$dir/$1" ]]; then
+            echo >&2 "No such stash as $1"
+            exit 1
+        else
+            n="$1"
+        fi
+    else
+        help >&2
+        exit 1
+    fi
+
+    rm -rf "$root/$dir/$n"
+
+    largestStash="$(ls $root/$dir | tail -n 1)"
+
+    if [[ $largestStash != "" ]]; then
+        for (( i = n + 1; i <= largestStash; i++ )); do
+            mv "$root/$dir/$i" "$root/$dir/$((i - 1))"
+        done
+    fi;
+}
+
+push() {
+    modified="$(cd $offset && cvs_status "$@" | grep -Po '(?<=^M ).+$')"
+
+    if [[ "$modified" == "" ]]; then
+        echo >&2 'No changes to stash'
+        exit 1
+    fi
+
+    lastStash="$(list | tail -n 1)"
+
+    if ! [[ "$lastStash" == "" ]]; then
+        for (( i="$lastStash"; i >= 1; i-- )); do
+            mv "$root/$dir/$i" "$root/$dir/$((i + 1))"
+        done
+    fi
+
+    for f in $modified; do
+        dest="$root/$dir/1/$offset/$f"
+        mkdir -p "$(dirname "$dest")"
+        mv "$offset/$f" "$dest"
+    done
+
+    (cd "$offset" && cvs update -d "$@" 2>/dev/null)
+}
+
+getRepoRoot() {
+    if ! [[ -d CVS ]]; then
+        echo >&2 'Error: Not in a repository'
+        exit 1
+    fi
+
+    dir="$(pwd)"
+    nextDir="$(dirname "$dir")"
+
+    while [[ -d "$nextDir/CVS" ]]; do
+        dir="$nextDir"
+        nextDir="$(dirname "$nextDir")"
+    done
+
+    echo "$dir"
+}
+
+cvs_status() {
+    cvs -q -n update -d "$@" 2>/dev/null
+}
+
+main "$@"
